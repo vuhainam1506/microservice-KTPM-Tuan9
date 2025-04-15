@@ -4,19 +4,47 @@ const axios = require('axios');
 
 const app = express();
 
+// Retry configuration
+const RETRY_COUNT = 3;
+const RETRY_DELAY = 3000; // Tăng lên 3 seconds
+const REQUEST_DELAY = 10000; // 10 seconds giữa các request
+
+// Helper function to delay execution
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+
 // Circuit Breaker configuration
 const breaker = new CircuitBreaker(async () => {
-    try {
-        const response = await axios.get('http://localhost:3001/api/service-b');
-        return response.data;
-    } catch (error) {
-        throw new Error('ECONNREFUSED');
+    let lastError;
+    
+    // Retry logic
+    for (let attempt = 1; attempt <= RETRY_COUNT; attempt++) {
+        try {
+            if (attempt > 1) {
+                console.log(`\n=== Retry Attempt ${attempt-1} of ${RETRY_COUNT} ===`);
+                console.log(`Waiting ${RETRY_DELAY/1000} seconds before retry...`);
+                await delay(RETRY_DELAY); // Fixed delay 3 seconds
+            }
+            
+            const response = await axios.get('http://localhost:3001/api/service-b');
+            if (attempt > 1) {
+                console.log(`Retry attempt ${attempt-1} successful`);
+            }
+            return response.data;
+            
+        } catch (error) {
+            lastError = error;
+            console.log(`Attempt ${attempt} failed:`, error.message);
+            
+            if (attempt === RETRY_COUNT) {
+                throw new Error('ECONNREFUSED');
+            }
+        }
     }
 }, {
-    timeout: 3000, // 3 seconds
-    errorThresholdPercentage: 50, // Changed from 100 to 50
-    resetTimeout: 10000, // 10 seconds until half-open
-    volumeThreshold: 3, 
+    timeout: 5000, // Tăng lên 5 seconds
+    errorThresholdPercentage: 50,
+    resetTimeout: 10000,
+    volumeThreshold: 3,
     rollingCountTimeout: 10000,
     rollingCountBuckets: 10
 });
@@ -97,9 +125,13 @@ breaker.on('success', () => {
     logCircuitState();
 });
 
-// API endpoint
+// API endpoint with delay between requests
 app.get('/api/v1/get-data', async (req, res) => {
     try {
+        console.log('\n=== New Request ===');
+        console.log(`Waiting ${REQUEST_DELAY/1000} seconds before processing...`);
+        await delay(REQUEST_DELAY);
+        
         const result = await breaker.fire();
         res.json(result);
     } catch (error) {
