@@ -22,24 +22,20 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 // Helper function to check rate limit
 function checkRateLimit() {
     const now = Date.now();
-    
-    // Remove requests older than TIME_WINDOW
     RATE_LIMIT.requests = RATE_LIMIT.requests.filter(timestamp => 
         now - timestamp < RATE_LIMIT.TIME_WINDOW
     );
 
-    // Check if we've hit the limit
     if (RATE_LIMIT.requests.length >= RATE_LIMIT.MAX_REQUESTS) {
         const oldestRequest = RATE_LIMIT.requests[0];
-        const timeToWait = RATE_LIMIT.TIME_WINDOW - (now - oldestRequest);
-        return {
-            allowed: false,
-            timeToWait: Math.ceil(timeToWait / 1000)
-        };
+        const timeToWait = Math.ceil((RATE_LIMIT.TIME_WINDOW - (now - oldestRequest)) / 1000);
+        
+        console.log(`[Rate Limiter] Blocked - Too many requests. Wait ${timeToWait}s`);
+        return { allowed: false, timeToWait };
     }
 
-    // Add new request timestamp
     RATE_LIMIT.requests.push(now);
+    console.log(`[Rate Limiter] Request accepted (${RATE_LIMIT.requests.length}/${RATE_LIMIT.MAX_REQUESTS})`);
     return { allowed: true };
 }
 
@@ -91,128 +87,60 @@ const logCircuitState = () => {
     const state = breaker.opened ? 'OPEN' : 
                  breaker.halfOpen ? 'HALF-OPEN' : 
                  breaker.closed ? 'CLOSED' : 'UNKNOWN';
-                 
-    console.log('\n=== Circuit Breaker State ===');
-    console.log('Current Stats:', {
-        failures: breaker.stats.failures,
-        successes: breaker.stats.successes,
-        rejects: breaker.stats.rejects,
-        total: breaker.stats.fires,
-        state: state
-    });
-    console.log('Consecutive Failures:', breaker.stats.failures);
-    console.log('Current State:', state);
-    console.log('========================\n');
+    console.log(`[Circuit Breaker] State: ${state}`);
 };
 
 breaker.on('open', () => {
-    console.log('\n=== Circuit Breaker OPENED after 3 consecutive failures ===');
-    console.log(`Circuit will attempt to half-open in ${breaker.options.resetTimeout/1000} seconds`);
-    logCircuitState();
-
-    // Set timeout to log when circuit goes to half-open
-    setTimeout(() => {
-        if (breaker.halfOpen) {
-            const timestamp = new Date().toISOString();
-            console.log('\n=== Circuit Breaker State Change ===');
-            console.log(`Timestamp: ${timestamp}`);
-            console.log('State: HALF-OPEN');
-            console.log('Action: Testing service availability with a single request');
-            console.log('Note: If this request fails, circuit will re-open');
-            console.log('      If request succeeds, circuit will close');
-            logCircuitState();
-        }
-    }, breaker.options.resetTimeout);
+    console.log(`[Circuit Breaker] OPENED - Service unavailable. Retry in ${breaker.options.resetTimeout/1000}s`);
 });
 
 breaker.on('halfOpen', () => {
-    const timestamp = new Date().toISOString();
-    console.log('\n=== Circuit Breaker State Change ===');
-    console.log(`Timestamp: ${timestamp}`);
-    console.log('State: HALF-OPEN');
-    console.log('Action: Testing service availability with a single request');
-    console.log('Note: If this request fails, circuit will re-open');
-    console.log('      If request succeeds, circuit will close');
-    logCircuitState();
+    console.log('[Circuit Breaker] HALF-OPEN - Testing service availability');
 });
 
 breaker.on('close', () => {
-    console.log('\n=== Circuit Breaker CLOSED - Service is operational ===');
-    console.log('Previous state:', breaker.status.state);
-    console.log('Service has recovered and is accepting requests normally');
-    logCircuitState();
+    console.log('[Circuit Breaker] CLOSED - Service operational');
 });
 
 breaker.on('failure', (error) => {
-    console.log('\n=== Call failed:', error.message);
-    console.log('Current failure count:', breaker.stats.failures);
     if (breaker.halfOpen) {
-        console.log('Failure during half-open state - Circuit will re-open');
+        console.log('[Circuit Breaker] Test request failed - Reopening circuit');
     } else if (breaker.stats.failures >= breaker.volumeThreshold) {
-        console.log('Maximum consecutive failures reached - Circuit will open');
+        console.log('[Circuit Breaker] Consecutive failures limit reached');
     }
-    logCircuitState();
 });
 
 breaker.on('success', () => {
-    console.log('\n=== Call succeeded - Service is operational ===');
     if (breaker.halfOpen) {
-        console.log('Success during half-open state - Circuit will close');
+        console.log('[Circuit Breaker] Test request succeeded - Closing circuit');
     }
-    logCircuitState();
 });
 
 // API endpoint with delay between requests
 app.get('/api/v1/get-data', async (req, res) => {
     try {
-        console.log('\n=== New Request ===');
-        console.log(`Waiting ${REQUEST_DELAY/1000} seconds before processing...`);
-        await delay(REQUEST_DELAY);
-        
         const result = await breaker.fire();
         res.json(result);
     } catch (error) {
         if (error.message.includes('RATE_LIMIT_EXCEEDED')) {
             return res.status(429).json({
-                message: 'Rate limit exceeded',
-                error: error.message,
-                note: 'Maximum 5 requests allowed per minute'
+                error: error.message
             });
         }
 
         if (breaker.opened) {
             return res.status(503).json({
-                message: 'Service B is unavailable - Circuit Breaker is OPEN',
-                error: 'Maximum consecutive failures reached',
-                circuitState: {
-                    state: breaker.status.state,
-                    consecutiveFailures: breaker.stats.failures,
-                    nextAttempt: `Circuit will try again in ${breaker.options.resetTimeout/1000} seconds`
-                }
+                error: 'Service unavailable - Circuit breaker is open'
             });
         }
 
         if (breaker.halfOpen) {
             return res.status(503).json({
-                message: 'Service B is being tested - Circuit Breaker is HALF-OPEN',
-                error: error.message,
-                circuitState: {
-                    state: breaker.status.state,
-                    consecutiveFailures: breaker.stats.failures,
-                    note: 'Testing single request to check service availability'
-                }
+                error: 'Service unavailable - Circuit breaker is testing connection'
             });
         }
 
-        res.status(503).json({
-            message: 'Service B is down',
-            error: error.message,
-            circuitState: {
-                state: breaker.status.state,
-                consecutiveFailures: breaker.stats.failures,
-                remainingAttempts: breaker.volumeThreshold - breaker.stats.failures
-            }
-        });
+        res.status(500).json({ error: error.message });
     }
 });
 
