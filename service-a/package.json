@@ -1,0 +1,10 @@
+{
+  "name": "service-a",
+  "version": "1.0.0",
+  "main": "index.js",
+  "dependencies": {
+    "express": "^4.18.2",
+    "opossum": "^7.1.0",
+    "axios": "^1.4.0"
+  }
+}
