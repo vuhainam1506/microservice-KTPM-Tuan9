@@ -7,13 +7,50 @@ const app = express();
 // Retry configuration
 const RETRY_COUNT = 3;
 const RETRY_DELAY = 3000; // Tăng lên 3 seconds
-const REQUEST_DELAY = 10000; // 10 seconds giữa các request
+const REQUEST_DELAY = 3000; // 10 seconds giữa các request
+
+// Rate Limiter configuration
+const RATE_LIMIT = {
+    MAX_REQUESTS: 5,  // 5 requests
+    TIME_WINDOW: 60000,  // 1 minute (in milliseconds)
+    requests: [],
+};
 
 // Helper function to delay execution
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
+// Helper function to check rate limit
+function checkRateLimit() {
+    const now = Date.now();
+    
+    // Remove requests older than TIME_WINDOW
+    RATE_LIMIT.requests = RATE_LIMIT.requests.filter(timestamp => 
+        now - timestamp < RATE_LIMIT.TIME_WINDOW
+    );
+
+    // Check if we've hit the limit
+    if (RATE_LIMIT.requests.length >= RATE_LIMIT.MAX_REQUESTS) {
+        const oldestRequest = RATE_LIMIT.requests[0];
+        const timeToWait = RATE_LIMIT.TIME_WINDOW - (now - oldestRequest);
+        return {
+            allowed: false,
+            timeToWait: Math.ceil(timeToWait / 1000)
+        };
+    }
+
+    // Add new request timestamp
+    RATE_LIMIT.requests.push(now);
+    return { allowed: true };
+}
+
 // Circuit Breaker configuration
 const breaker = new CircuitBreaker(async () => {
+    // Check rate limit before making request
+    const rateLimitCheck = checkRateLimit();
+    if (!rateLimitCheck.allowed) {
+        throw new Error(`RATE_LIMIT_EXCEEDED: Try again in ${rateLimitCheck.timeToWait} seconds`);
+    }
+
     let lastError;
     
     // Retry logic
@@ -22,7 +59,7 @@ const breaker = new CircuitBreaker(async () => {
             if (attempt > 1) {
                 console.log(`\n=== Retry Attempt ${attempt-1} of ${RETRY_COUNT} ===`);
                 console.log(`Waiting ${RETRY_DELAY/1000} seconds before retry...`);
-                await delay(RETRY_DELAY); // Fixed delay 3 seconds
+                await delay(RETRY_DELAY);
             }
             
             const response = await axios.get('http://localhost:3001/api/service-b');
@@ -135,6 +172,14 @@ app.get('/api/v1/get-data', async (req, res) => {
         const result = await breaker.fire();
         res.json(result);
     } catch (error) {
+        if (error.message.includes('RATE_LIMIT_EXCEEDED')) {
+            return res.status(429).json({
+                message: 'Rate limit exceeded',
+                error: error.message,
+                note: 'Maximum 5 requests allowed per minute'
+            });
+        }
+
         if (breaker.opened) {
             return res.status(503).json({
                 message: 'Service B is unavailable - Circuit Breaker is OPEN',
@@ -177,6 +222,22 @@ breaker.fallback(() => {
         timestamp: new Date().toISOString(),
         status: "FALLBACK"
     };
+});
+
+// Add endpoint to check current rate limit status
+app.get('/api/v1/rate-limit-status', (req, res) => {
+    const now = Date.now();
+    const activeRequests = RATE_LIMIT.requests.filter(timestamp => 
+        now - timestamp < RATE_LIMIT.TIME_WINDOW
+    ).length;
+
+    res.json({
+        maxRequests: RATE_LIMIT.MAX_REQUESTS,
+        timeWindow: `${RATE_LIMIT.TIME_WINDOW/1000} seconds`,
+        currentRequests: activeRequests,
+        remainingRequests: RATE_LIMIT.MAX_REQUESTS - activeRequests,
+        requestHistory: RATE_LIMIT.requests.map(timestamp => new Date(timestamp).toISOString())
+    });
 });
 
 const PORT = 3000;
