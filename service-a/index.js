@@ -7,7 +7,7 @@ const app = express();
 // Retry configuration
 const RETRY_COUNT = 3;
 const RETRY_DELAY = 3000; // Tăng lên 3 seconds
-const REQUEST_DELAY = 3000; // 10 seconds giữa các request
+const REQUEST_DELAY = 7000; // 10 seconds giữa các request
 
 // Rate Limiter configuration
 const RATE_LIMIT = {
